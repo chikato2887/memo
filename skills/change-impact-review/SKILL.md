@@ -1,153 +1,181 @@
 ---
 name: change-impact-review
-description: Review a Git diff in an unfamiliar repository by tracing structural and behavioral impact, testing risk hypotheses with evidence, and reporting findings and uncertainty. Use for PR reviews, especially when downstream effects are unclear.
+description: 未知のリポジトリのGit差分について、構造的・振る舞い上の影響を探索し、リスク仮説を証拠で検証するレビュー用スキル。PRレビュー、影響範囲の調査、既存コードの安全性確認に使用する。
 ---
 
-# Change Impact Review
+# Change Impact Review（変更影響レビュー）
 
-Review **the impact of changes**, not only the changed lines. Work with unfamiliar languages and architectures. Prefer evidence from code, specifications, and tests over conjecture. Never imply completeness where the tooling or budget does not support it.
+変更行だけでなく、**変更がシステムに与える影響**をレビューする。言語・フレームワーク・アーキテクチャが未知でも適用できるようにする。推測より、コード・仕様・テストによる検証可能な証拠を優先する。調査範囲やツールの制約がある場合、網羅的に確認したかのように報告してはならない。
 
-## Non-negotiable: visible review journal in the terminal
+## 最重要要件：調査と判断をセッション上で可視化する
 
-**Do not silently investigate and only show a final summary.** The human reviewer must be able to follow the review as it runs, challenge assumptions, and interrupt unproductive exploration.
+**裏側で黙々と調査し、最後に結論だけ出してはならない。** 人間のレビュワーが調査途中に疑問を挟み、仮説を修正し、無駄な探索を止められるようにする。
 
-At each meaningful step, print a short **decision record in the live terminal/session** (ordinary assistant output; not hidden reasoning, and not only in a generated file). Show:
+重要な調査の節目ごとに、ターミナル／エージェントのセッション上に短い**判断記録**を通常の応答として出す。生成ファイルへの保存だけでは不十分。以下を含める。
 
-1. **Context** — what was changed and what existing behavior/contract matters.
-2. **Risk hypothesis** — what could go wrong, and why this change raised the concern.
-3. **Probe** — exactly what file/symbol/reference/test/command is being examined and what evidence would settle the hypothesis.
-4. **Observation** — what was actually found, with paths/lines or command results.
-5. **Judgment** — confirmed issue, ruled out **within examined scope**, or still uncertain; **why**.
-6. **Next step / stop reason** — why another branch is pursued or why exploration stops.
+1. **背景**：何が変わり、既存のどんな振る舞いや契約が関係するか。
+2. **リスク仮説**：何が壊れ得るか。なぜそのリスクを思いついたか。
+3. **調査計画**：どのファイル・シンボル・参照・テスト・コマンドを確認し、何が分かれば仮説を支持／否定できるか。
+4. **観測結果**：実際に何が見つかったか。ファイル・行番号・コマンド結果などを示す。
+5. **判断と根拠**：問題が確認されたか、調査範囲内で否定できたか、判断保留か。**なぜそう判断したか**。
+6. **次の行動／停止理由**：追加調査する理由、あるいは探索を止める理由。
 
-These are concise, factual **rationales and audit trails**, not a demand to expose private chain-of-thought. Never invent tools, results, or reasoning steps. If terminal output cannot be emitted as work progresses, state that limitation and provide the same sequence of records in the visible response, not just the final conclusion.
+これは内部の非公開推論を出力する指示ではなく、**人間が検証できる事実・判断根拠・調査履歴を簡潔に伝える**ための要件。実行していない調査や確認結果を作り上げてはならない。実行中の逐次表示が利用できない環境なら、その制約を伝え、最終結論だけでなく同等の判断記録をユーザーに見える形で提示する。
 
-### Terminal message examples
-
-```text
-[IMPACT] Changed: getUser now reads a shared cache before repository lookup.
-[RISK H1] Stale reads: updateUser may not invalidate the cache; relevant because previously reads always hit the repository.
-[PROBE H1] Inspect cache writers/invalidation and updateUser callers; look for invalidation after successful writes.
-[EVIDENCE H1] src/users/update.ts:42 updates the DB; no invalidation in its call path (checked ...). Cache TTL is configured at src/cache.ts:18.
-[DECISION H1] OPEN — TTL limits duration but does not establish required freshness. Next: check explicit consistency contract and tests.
-```
-
-For a resolved case:
+### セッションに表示する例
 
 ```text
-[RISK H2] Potential duplicate processing when two requests overlap.
-[PROBE H2] Checked transaction boundary and relevant concurrent test.
-[EVIDENCE H2] ... (file:line, test command/result).
-[DECISION H2] NOT REPRODUCED in tested scenario; not proof of absence under all schedules.
-[STOP H2] Budget reached; record untested interleavings.
+[変更]
+getUser がDBにアクセスする前に共有キャッシュを参照するようになった。
+
+[リスク H1]
+古いデータが返る可能性。従来はDBを直接参照していたが、
+キャッシュ導入後は更新時の無効化が必要になる可能性がある。
+
+[調査 H1]
+updateUser の呼び出し経路とキャッシュの書き込み・無効化処理を確認。
+DB更新成功後にキャッシュが無効化されるかを調べる。
+
+[証拠 H1]
+src/users/update.ts:42 でDBを更新。
+確認した呼び出し経路では無効化処理が見つからなかった。
+src/cache.ts:18 にTTLの設定がある。
+
+[判断 H1]
+保留。TTLは古い値が残る時間を制限するが、必要な鮮度が
+保証されるとは限らない。
+
+[次の調査 H1]
+整合性に関する仕様と既存テストを確認する。
 ```
 
-A visible journal should appear **during** analysis: after initial scoping, when a hypothesis is added, before/after a substantive probe, and when it closes or is deferred. For very large changes, group trivial probes but never hide the reason for prioritization or abandonment. Do not dump enormous tool outputs; summarize them with navigable references.
+否定できなかった／テストで再現しなかった場合の例：
 
-## 0. Establish the diff and capabilities
+```text
+[リスク H2]
+リクエストが重なったとき、処理が二重実行される可能性。
 
-- Identify repo root, language/build/test manifests, project docs, and explicit base/head ref. If absent, determine a reasonable comparison and **state it**. Include staged/unstaged/untracked files only if in review scope.
-- Inspect `git status --short`, `git diff --stat`, and exact relevant hunks. Account for renames, configuration, generated files, migrations, schemas and dependency changes.
-- Detect available tools before use. Prefer **Serena MCP** for symbol-aware definition/reference search when its language-server project setup works. Use `rg` for cross-cutting textual links, dynamic registration, configs and fallback. Use **ast-grep** when syntax-pattern searching adds value and it is installed. Use native LSP facilities where available.
-- Missing tool/indexing support is a coverage gap, **not** evidence of no callers.
-- **Print [SCOPE]** exact comparison, notable changes, tools and limitations.
+[調査 H2]
+トランザクション境界と同時実行テストを確認。
 
-## 1. Interpret semantic changes
+[証拠 H2]
+<ファイル:行番号、実行したテストと結果>
 
-For each logical change, read the before/after implementation and surrounding context. Identify entry points, external contracts, call sites, state changes, async/error behavior, resource paths and existing tests. Distinguish intended behavior backed by docs from intent inferred from implementation.
+[判断 H2]
+確認したテスト条件では再現しなかった。
+すべての実行順序で発生しないことまでは保証できない。
 
-**Print [CHANGE]** a brief before → after explanation and the most important unknown.
+[停止 H2]
+調査予算の上限に達したため、未検証の実行順序を残課題として記録。
+```
 
-## 2. Generate and prioritize hypotheses
+判断記録は**調査中**に表示する。少なくとも、調査対象の確定時、仮説の追加時、重要な調査の前後、仮説の解決・保留時に出す。巨大な変更では軽微な調査をまとめてもよいが、優先順位や打ち切り理由は隠さない。長いツール出力を丸ごと貼るのではなく、辿れる参照先と要点を示す。
 
-Use two lenses:
+## 0. 差分と利用可能なツールを確認する
 
-- **Change-driven:** Which callers, consumers, shared data, downstream systems or runtime behaviors can this change affect?
-- **Property-driven:** Which local guarantees could be violated? Gather candidates from API schemas, type constraints, DB constraints, tests, documentation, ADRs and state transitions. Mark each as `explicit_contract`, `observed_behavior`, or `inferred_property`; existing implementation/tests are not automatically correct.
+- リポジトリのルート、言語、ビルド・テスト設定、設計資料、レビュー対象のbase/headを把握する。指定がない場合は妥当な比較対象を選び、**何と何を比較したか明示する**。ステージ済み・未ステージ・未追跡ファイルを含むかは依頼された範囲に従う。
+- `git status --short`、`git diff --stat`、該当する差分を確認する。リネーム、設定、生成物、マイグレーション、スキーマ、依存パッケージ変更を見落とさない。
+- ツールは使用前に利用可否を調べる。シンボル解決が正常に動く場合、定義・参照元の探索には**Serena MCP**を優先する。文字列による連携、動的登録、設定、フォールバックには`rg`を使う。構文パターンの調査に価値があり、導入済みなら**ast-grep**を使う。利用できるLSPも活用する。
+- ツールが動かない、インデックスが不完全という事実は**調査範囲の制約**であって、「参照元が存在しない」証拠ではない。
+- **[対象]**として比較範囲、主要な変更、利用可能なツールと制約を表示する。
 
-Consider correctness, reliability/concurrency, maintainability/readability, performance, security, and testability. Do not mechanically manufacture a risk for every category.
+## 1. 差分の意味を理解する
 
-For each hypothesis define an ID, trigger, potential failure, affected areas, expected confirming/disconfirming evidence, and priority (impact/reach/uncertainty). **Print [RISK Hn]** with the concrete reason it is being investigated.
+変更のまとまりごとに、変更前・変更後と周辺コードを読む。エントリーポイント、外部契約、呼び出し元、状態変更、非同期処理、例外、リソース利用、既存テストを把握する。仕様・文書に裏付けられた意図と、実装から推測した意図を分ける。
 
-## 3. Adaptive evidence-driven exploration
+**[変更]**として「変更前 → 変更後」の振る舞いと重要な未知事項を表示する。
 
-Investigate the highest-value unresolved hypothesis first. Use these edges as needed:
+## 2. リスク仮説を作成して優先順位を付ける
 
-| Trigger | Probe |
+次の2方向で考える。
+
+- **変更起点（Change-driven）**：変更されたコードの呼び出し元、利用者、共有データ、後続システム、実行時の振る舞いにどう影響するか。
+- **性質起点（Property-driven）**：近傍のどの保証すべき性質が壊れる可能性があるか。APIスキーマ、型制約、DB制約、テスト、設計資料、ADR、状態遷移などから候補を抽出する。それぞれ`explicit_contract`（明示的な契約）、`observed_behavior`（実装上観測できる振る舞い）、`inferred_property`（推定した性質）に分類する。既存実装やテストを無条件で正しい仕様とみなさない。
+
+正しさ、信頼性・並行性、保守性・可読性、性能、セキュリティ、テスト容易性を考慮する。ただし全カテゴリで無理に指摘を作らない。
+
+各仮説にはID、着眼点、起こり得る障害、影響候補、支持・反証に必要な証拠、優先順位（影響度・波及範囲・不確実性）を記録する。**[リスク Hn]**で「なぜ疑ったか」を具体的に示す。
+
+## 3. 証拠に応じて探索を広げる
+
+優先度の高い未解決仮説から調べる。必要に応じて以下の経路を追う。
+
+| 変化・手掛かり | 次に調べる対象 |
 | --- | --- |
-| Changed public symbol | Serena/LSP references, implementations, callers/callees |
-| State/cache/DB writes | Reads, writes, invalidation, transaction boundaries, concurrent access |
-| Async/stream/retry/cancel | Ordering, dropped errors, resource cleanup, shared state, partial responses, backpressure |
-| API/schema/event | Producers, consumers, validators, serialization, compatibility |
-| Auth/trust boundary | Sources, validation, authorization, sensitive sinks |
-| Hot path | Frequency, loops, I/O, allocations, measurement or profiling |
-| Test change | Preconditions, control of scheduling/environment, assertion relevance, counterexamples |
-| Dynamic binding | String/config/DI/route/event searches with `rg` or ast-grep |
+| 公開シンボルの変更 | Serena/LSPで参照元、実装、呼び出し元・先を探索 |
+| 共有状態・キャッシュ・DBの更新 | 読み書き、無効化、トランザクション、並行アクセス |
+| 非同期・ストリーム・リトライ・キャンセル | 実行順序、エラーの消失、後片付け、共有状態、部分応答、バックプレッシャー |
+| API・スキーマ・イベント変更 | 生成側・利用側、検証、シリアライズ、後方互換性 |
+| 認証・信頼境界 | 入力元、入力検証、認可、機密情報が渡る先 |
+| 頻繁に通る処理 | 呼び出し頻度、ループ、I/O、メモリ確保、実測値 |
+| テスト変更 | 前提条件、実行順序・環境の制御、アサーションと保証したい性質、反例 |
+| 動的な結合 | `rg`やast-grepで文字列・設定・DI・ルート・イベント登録を探索 |
 
-Before meaningful investigation **print [PROBE Hn]** with *what* and *why*. Afterwards **print [EVIDENCE Hn]** including precise file/symbol/line or test command/result. Always explain the finding's relationship to the hypothesis.
+重要な調査の前に**[調査 Hn]**で「何を、なぜ調べるか」を表示し、後に**[証拠 Hn]**でファイル・行番号やテスト結果を示す。証拠が仮説にどう関係するかも説明する。
 
-Avoid blindly expanding high-fan-out dependency graphs. Update priority as new evidence arrives. Serena is not a complete system dependency graph; string-based protocols, reflection and cross-service behavior require separate exploration.
+依存グラフを無制限に辿らない。新たな証拠が見つかるたびに優先順位を見直す。Serenaはシステム全体の完全な依存グラフではない。文字列ベースのプロトコル、リフレクション、別サービスへの影響は別途確認する。
 
-## 4. Verification and stopping rules
+## 4. 検証と探索の停止条件
 
-A **verified finding** needs an identifiable execution path, a violated property/contract, and relevant code evidence or a reproducible test. Prefer targeted tests when feasible, never claim a check passed without running it. Performance allegations require caution: mark unmeasured impacts as hypotheses.
+**確認済みの問題**として報告するには、問題が起こる実行経路、違反する性質・契約、関連するコード上の証拠または再現テストが必要。可能なら対象を絞ったテストを実行する。実行していないテストの成功を主張しない。性能への懸念は実測のない段階では仮説として扱う。
 
-For each branch emit **[DECISION Hn]** and one stopping classification:
+各探索経路について**[判断 Hn]**と次の停止分類を記録する。
 
-- `resolved`: supported evidence establishes impact or sufficiently rules out the specific hypothesis **within stated scope**;
-- `merged`: same path already investigated elsewhere, with the linked evidence;
-- `budget_limited`: time/token/exploration depth cap reached;
-- `tool_limited`: indexing/unavailable tools/inaccessible dependency;
-- `unknown`: cannot substantiate or refute.
+- `resolved`：明示した範囲内で、証拠から影響を確認した、または特定の仮説を十分に否定できた。
+- `merged`：すでに調査した経路に合流した。対応する証拠に紐づける。
+- `budget_limited`：時間・トークン・探索深度の予算上限に達した。
+- `tool_limited`：インデックス不足、ツール未導入、外部依存にアクセス不可。
+- `unknown`：その他の理由で判断に必要な証拠が足りない。
 
-Explicitly say **why the evidence is sufficient or insufficient**. Avoid “no problem” without a rationale. Distinguish “test passed for case X” from “race is impossible”. Unresolved high-risk hypotheses must be visible, not silently discarded.
+**なぜ証拠が十分／不十分なのかを明示する。**「問題なし」だけで終えない。「ある条件でテストが通った」と「競合が絶対起こらない」を混同しない。未解決で重大な仮説を黙って破棄しない。
 
-Default first pass: changed hunks and context; bounded reference search for key symbols; up to ~5 prioritized hypotheses; deepen when evidence indicates risk. These are starting heuristics, not guarantees. Announce budget adjustments in the journal.
+初回の目安は、変更箇所と周辺の確認、重要なシンボルの限定的な参照探索、優先度の高い仮説を最大5件程度。追加の証拠が出たら探索を深める。これは網羅性の保証ではなく調整可能な初期値。予算を変える場合も判断記録で知らせる。
 
-## 5. Final review and impact report
+## 5. 最終レポート
 
-After live journal entries, output:
+調査中の判断記録を表示したうえで、最後に以下を出力する。
 
 ```markdown
-# Change Impact Review
-Scope: <exact diff / exclusions>
-Tools and coverage: <working and unavailable>
+# 変更影響レビュー
+対象: <比較した差分、対象外とした領域>
+ツールと調査範囲: <使えたもの、使えなかったもの>
 
-## What changed
-- <behavior before → after>
+## 変更の要約
+- <変更前 → 変更後の振る舞い>
 
-## Impact map
-| Change | Affected path / property | Evidence | Status / stop reason |
+## 影響範囲
+| 変更 | 影響先・保証したい性質 | 根拠 | 状態・停止理由 |
 | --- | --- | --- | --- |
-| ... | ... | file:line | resolved / merged / budget_limited / tool_limited / unknown |
+| ... | ... | ファイル:行番号 | resolved / merged / budget_limited / tool_limited / unknown |
 
-## Verified findings
-- [severity] <failure, when and why it occurs>
-  Evidence: <file:line + execution path + test/reproduction if run>
-  Fix direction: <actionable>
+## 確認できた問題
+- [重要度] <何が、どんな条件で、なぜ壊れるか>
+  根拠: <ファイル:行番号、実行経路、実行したテスト・再現方法>
+  対応案: <実行可能な方向性>
 
-## Investigated hypotheses and decisions
-| Hypothesis | Why considered | What was checked | Observation | Judgment and reason |
+## 調査したリスクと判断の履歴
+| 仮説 | 思いついた背景 | 調べたこと | 観測結果 | 判断と理由 |
 | --- | --- | --- | --- | --- |
 | H1 | ... | ... | ... | ... |
 
-## Open questions and residual uncertainty
-- <not explored, missing evidence/tools, next effective probe>
+## 未解決の疑問・残る不確実性
+- <未調査領域、足りない証拠・ツール、次に有効な調査>
 
-## Perspective coverage
-- Correctness / Reliability / Maintainability / Performance / Security / Testability: <what was checked and omitted>
+## 観点ごとの確認範囲
+- 正しさ / 信頼性 / 保守性 / 性能 / セキュリティ / テスト容易性:
+  <確認した点と未確認の点>
 
-## Checks executed
-- <exact commands and outcomes; state if none>
+## 実施したチェック
+- <実行したコマンドと結果。未実行ならその旨>
 ```
 
-If no verified findings, write **“No verified findings within examined scope”**, never **“No issues.”** Final report must preserve the journal's decisions (including discarded hypotheses and their reasons), not just successful bug discoveries.
+確認済みの問題がなければ、**「調査範囲内で確認できた問題はありません」**と書き、無限定の「問題ありません」は避ける。最終レポートには、問題として報告しなかった仮説も含め、調査内容と判断理由を残す。
 
-## Final self-check
+## 最終セルフチェック
 
-- Is the comparison exact and visible?
-- Could the human observe **why** each major risk was raised, **what** was checked, **what** was found, and **why** the conclusion followed **as the review ran**?
-- Are contracts separate from guesses?
-- Does every verified finding have evidence?
-- Are unsearched paths and tool limitations explicit?
-- Did a successful test get overstated as a proof of absence?
+- 比較対象と対象外の範囲が明確か。
+- 人間がセッション中に、**なぜリスクを考え、何を調べ、何が見つかり、なぜその結論になったのか**を追えたか。
+- 明示的な契約と推測を区別したか。
+- 確認済みの問題すべてに証拠があるか。
+- 未調査の経路とツールの制約を明示したか。
+- テストが通ったことを過大評価していないか。
